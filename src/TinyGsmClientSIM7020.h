@@ -68,10 +68,12 @@ class TinyGsmSim7020 : public TinyGsmSim70xx<TinyGsmSim7020>,
     TINY_GSM_CLIENT_CONNECT_OVERRIDES
 
     void stop(uint32_t maxWaitMs) {
-      dumpModemBuffer(maxWaitMs);
-      at->sendAT(GF("+CSOCL="), socket_id);
+      if (socket_id > -1 && sock_connected) {
+        dumpModemBuffer(maxWaitMs);
+        at->sendAT(GF("+CSOCL="), socket_id);
+        at->waitResponse(3000);
+      }
       sock_connected = false;
-      at->waitResponse(3000);
     }
     void stop() override {
       stop(15000L);
@@ -264,17 +266,20 @@ class TinyGsmSim7020 : public TinyGsmSim70xx<TinyGsmSim7020>,
     sendAT(GF("+CFUN=1"));
     res = waitResponse(20000L, GF(GSM_NL "+CPIN: READY"));
     if (res != 1) { return res; }
+    waitResponse();
 
-    sendAT(GF("+CGREG?"));
-    res = waitResponse(20000L, GF(GSM_NL "+CREG: 0,1"));
+    //sendAT(GF("+CGREG?"));
+    //res = waitResponse(20000L, GF(GSM_NL "+CGREG: 0,1"));
+    //waitResponse();
+    res = waitForNetwork();
 
     return res;
   }
 
   bool gprsDisconnectImpl() {
     // Shut down the general application TCP/IP connection
-    sendAT(GF("+CGACT=0,0"));
-    if (waitResponse(60000L) != 1) { return false; }
+    //sendAT(GF("+CGACT=0,0"));
+    //if (waitResponse(60000L) != 1) { return false; }
 
     sendAT(GF("+CGATT=0"));  // Deactivate the bearer context
     if (waitResponse(60000L) != 1) { return false; }
@@ -372,6 +377,16 @@ class TinyGsmSim7020 : public TinyGsmSim70xx<TinyGsmSim7020>,
       // AT+CSOCON=<socket_id>,<remote_port>,<remote_address>
       sendAT(GF("+CSOCON="), sockets[mux]->socket_id, ",", port, ",", host);
       int8_t res = waitResponse();
+      if (res != 1) { return false; }
+
+      // Enable Get Data from Network Manually
+      //sendAT(GF("+CSORXGET=1,"), sockets[mux]->socket_id);
+      //if (waitResponse(GF("+CSORXGET:")) != 1) { return 0; }
+      //int8_t res = waitResponse();
+
+      sendAT(GF("+CSORCVFLAG=1"));
+      res = waitResponse();
+
       return res == 1;
     }
   }
@@ -380,7 +395,7 @@ class TinyGsmSim7020 : public TinyGsmSim70xx<TinyGsmSim7020>,
     if (sockets[mux]->is_tls) {
       // Send Data
       sendAT(GF("+CTLSSEND="), sockets[mux]->socket_id, ',', (uint16_t)len, (const char*)buff);
-      if (waitResponse(GF(GSM_NL "+CTLSSEND:")) != 1) { return false; }
+      if (waitResponse(GF(GSM_NL "+CTLSSEND:")) != 1) { return 0; }
       waitResponse();
       return len;
     } else {
@@ -391,15 +406,20 @@ class TinyGsmSim7020 : public TinyGsmSim70xx<TinyGsmSim7020>,
       stream.write(reinterpret_cast<const uint8_t*>(buff), len);
       stream.flush();
 
-      // OK after posting data
-      if (waitResponse() != 1) { return 0; }
-
+      // DATA ACCEPT after posting data      
+      if (waitResponse(GF(GSM_NL "DATA ACCEPT:")) != 1) { return 0; }
+      int8_t accepted = streamGetIntBefore('\n');
+      if (accepted != len) {
+        DBG("### Mismatch accepted data", accepted, "length", len);
+      }
+      waitResponse();
       return len;
     }
   }
 
   size_t modemRead(size_t size, uint8_t mux) {
     if (!sockets[mux]) { return 0; }
+    if (!sockets[mux]->sock_connected) { return 0; }
 
     int16_t len_confirmed = 0;
     if (sockets[mux]->is_tls) {
@@ -418,12 +438,6 @@ class TinyGsmSim7020 : public TinyGsmSim70xx<TinyGsmSim7020>,
       if (size > 1460) {
         size = 1460;
       }
-
-      // Enable Get Data from Network Manually
-      sendAT(GF("+CSORXGET=1,"), sockets[mux]->socket_id);
-      if (waitResponse(GF("+CSORXGET:")) != 1) { return 0; }
-      waitResponse();
-
       // Get Data
       sendAT(GF("+CSORXGET=2,"), sockets[mux]->socket_id, ',', (uint16_t)size);
       if (waitResponse(GF("+CSORXGET:")) != 1) { return 0; }
@@ -459,18 +473,19 @@ class TinyGsmSim7020 : public TinyGsmSim70xx<TinyGsmSim7020>,
   size_t modemGetAvailable(uint8_t mux) {
     // If the socket doesn't exist, just return
     if (!sockets[mux]) { return 0; }
-    // Query data available
-    sendAT(GF("+CSORXGET=4,"), sockets[mux]->socket_id);
+    if (!sockets[mux]->sock_connected) {
+      sockets[mux]->sock_available = 0;
+    } else {
+      // Query data available
+      sendAT(GF("+CSORXGET=4,"), sockets[mux]->socket_id);
 
-    streamSkipUntil(',');  // skip the mode
-    streamSkipUntil(',');  // skip the response socket id
-    int16_t len_confirmed = stream.parseInt();
-    waitResponse();
+      streamSkipUntil(',');  // skip the mode
+      streamSkipUntil(',');  // skip the response socket id
+      int16_t len_confirmed = stream.parseInt();
+      waitResponse();
 
-    sockets[mux]->sock_available = len_confirmed;
-
-    modemGetConnected(mux);
-    if (!sockets[mux]) { return 0; }
+      sockets[mux]->sock_available = len_confirmed;
+    }
     return sockets[mux]->sock_available;
   }
 
@@ -551,19 +566,30 @@ class TinyGsmSim7020 : public TinyGsmSim70xx<TinyGsmSim7020>,
           */
         } else if (data.endsWith(GF("+CSONMI:"))) {
           int8_t socket_id = streamGetIntBefore(',');
-          int16_t len = streamGetIntBefore(',');
+          int16_t data_length = streamGetIntBefore(',');
           int8_t mux = getMuxFromSocketId(socket_id);
           if (mux >= 0) {
             sockets[mux]->got_data = true;
-            sockets[mux]->sock_available = len;
-            DBG("### Got Data:", len, "on", mux);
+            DBG("### Got Data:", data_length, "on", mux);
+          }
+          for (int i = 0; i < data_length; i++) {
+            uint32_t startMillis = millis();
+            while (!stream.available() &&
+                  (millis() - startMillis < sockets[mux]->_timeout)) {
+              TINY_GSM_YIELD();
+            }
+            char c = stream.read();
+            if (mux >= 0) {
+              sockets[mux]->rx.put(c);
+            }
           }
           data = "";
         } else if (data.endsWith(GF("+CSOERR:"))) {
           int8_t socket_id = streamGetIntBefore(',');
           int8_t error_code = streamGetIntBefore('\n');
           int8_t mux = getMuxFromSocketId(socket_id);
-          if (mux >= 0) {
+          // <error code> 4 = disconnected (expected automatic disconnection)
+          if (mux >= 0 && error_code != 4) {
             sockets[mux]->sock_connected = false;
             DBG("### Closed: ", mux, "error", error_code);
           }
