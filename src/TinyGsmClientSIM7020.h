@@ -103,8 +103,8 @@ class TinyGsmSim7020 : public TinyGsmSim70xx<TinyGsmSim7020>,
     }
 
    public:
-    bool setRootCA(const String& rootCA) {
-      return at->setRootCA(rootCA, mux);
+    bool setServerCertificate(const String& certificate) {
+      return at->setServerCertificate(certificate, mux);
     }
 
     virtual int connect(const char* host, uint16_t port,
@@ -138,6 +138,21 @@ class TinyGsmSim7020 : public TinyGsmSim70xx<TinyGsmSim7020>,
       : TinyGsmSim70xx<TinyGsmSim7020>(stream),
         certificates() {
     memset(sockets, 0, sizeof(sockets));
+  }
+
+  /*
+   * Certificate setup
+   */
+  bool setRootCA(const String& certificate) {
+    return setCertificate(0, certificate.c_str());
+  }
+
+  bool setClientCA(const String& certificate) {
+    return setCertificate(1, certificate.c_str());
+  }
+
+  bool setClientPrivateKey(const String& certificate) {
+    return setCertificate(2, certificate.c_str());
   }
 
   /*
@@ -229,9 +244,62 @@ class TinyGsmSim7020 : public TinyGsmSim70xx<TinyGsmSim7020>,
    * Secure socket layer functions
    */
  protected:
-  bool setRootCA(const String& rootCA, const uint8_t mux = 0) {
+  bool setServerCertificate(const String& certificate, const uint8_t mux = 0) {
     if (mux >= TINY_GSM_MUX_COUNT) return false;
-    certificates[mux] = rootCA;
+    certificates[mux] = certificate;
+    return true;
+  }
+
+  bool setCertificate(int8_t type, const char *certificate, int8_t mux = -1)
+  {
+    /*  type 0 : Root CA
+        type 1 : Client CA
+        type 2 : Client Private Key
+    */
+    if (certificate == NULL) {
+        return false;
+    }
+    int16_t total_length = strlen_P(certificate);
+    int8_t is_more = 1;
+    int16_t index = 0;
+    int16_t chunk_end = 0;
+    char c = '\0';
+
+    while (index < total_length) {
+      chunk_end += 500;
+      if (chunk_end >= total_length) {
+        chunk_end = total_length;
+        is_more = 0;
+      }
+
+      if (mux == -1) {
+        streamWrite(GF("AT+CSETCA="));
+        streamWrite(type);
+        streamWrite(',');
+        streamWrite(total_length);
+        streamWrite(',');
+        streamWrite(is_more);
+        streamWrite(",0,\"");
+      } else {
+        int8_t mux_type = 6 + type;
+        streamWrite(GF("AT+CTLSCFG="));
+        streamWrite(mux);
+        streamWrite(',');
+        streamWrite(mux_type);
+        streamWrite(',');
+        streamWrite(total_length);
+        streamWrite(',');
+        streamWrite(is_more);
+        streamWrite(",\"");
+      }
+      while (index < chunk_end) {
+        c = certificate[index];
+        streamWrite(c);
+        index++;
+      }
+      streamWrite("\"" GSM_NL);
+      if (waitResponse() != 1) { return false; }
+    }
     return true;
   }
 
@@ -678,10 +746,8 @@ class TinyGsmSim7020 : public TinyGsmSim70xx<TinyGsmSim7020>,
     sendAT(GF("+CTLSCFG="), mux, ",1,\"", host, "\",2,", port, ",3,0,4,0,5,2");
     if (waitResponse(5000L) != 1) return false;
 
-    if (certificates[mux] != "") {
-      sendAT(GF("+CTLSCFG="), mux, ",6,", certificates[mux].length(),",\"", certificates[mux].c_str(),
-              "\"");
-      if (waitResponse(5000L) != 1) return false;
+    if (certificates[mux] && certificates[mux] != "") {
+      if (!setCertificate(0, certificates[mux].c_str(), mux)) { return false; }
     }
 
     sockets[mux]->socket_id = -1;
