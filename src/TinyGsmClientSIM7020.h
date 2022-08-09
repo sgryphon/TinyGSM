@@ -18,13 +18,16 @@
 #include "TinyGsmClientSIM70xx.h"
 #include "TinyGsmTCP.tpp"
 #include "TinyGsmSSL.tpp"
+#include "TinyGsmHTTP.tpp"
 
 class TinyGsmSim7020 : public TinyGsmSim70xx<TinyGsmSim7020>,
                        public TinyGsmTCP<TinyGsmSim7020, TINY_GSM_MUX_COUNT>,
-                       public TinyGsmSSL<TinyGsmSim7020> {
+                       public TinyGsmSSL<TinyGsmSim7020>,
+                       public TinyGsmHTTP<TinyGsmSim7020> {
   friend class TinyGsmSim70xx<TinyGsmSim7020>;
   friend class TinyGsmTCP<TinyGsmSim7020, TINY_GSM_MUX_COUNT>;
   friend class TinyGsmSSL<TinyGsmSim7020>;
+  friend class TinyGsmHTTP<TinyGsmSim7020>;
 
   /*
    * Inner Client
@@ -128,6 +131,33 @@ class TinyGsmSim7020 : public TinyGsmSim70xx<TinyGsmSim7020>,
     void stop() override {
       stop(15000L);
     }
+  };
+
+  /*
+   * Inner HTTP Client
+   */
+  class GsmHttpClientSim7020 : public GsmHttpClient {
+    friend class TinyGsmSim7020;
+
+   public:
+    GsmHttpClientSim7020() {}
+
+    explicit GsmHttpClientSim7020(TinyGsmSim7020& modem, uint8_t mux = 0) {
+      init(&modem, mux);
+    }
+
+    bool init(TinyGsmSim7020* modem, uint8_t mux = 0) {
+      this->at       = modem;
+
+      return true;
+    }
+
+   public:
+
+    /*
+     * Extended API
+     */
+
   };
 
   /*
