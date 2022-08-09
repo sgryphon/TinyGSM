@@ -388,16 +388,20 @@ class TinyGsmSim7020 : public TinyGsmSim70xx<TinyGsmSim7020>,
 
       // Connect Socket to Remote Address and Port
       // AT+CSOCON=<socket_id>,<remote_port>,<remote_address>
-      sendAT(GF("+CSOCON="), sockets[mux]->socket_id, ",", port, ",", host);
+      sendAT(GF("+CSOCON="), sockets[mux]->socket_id, ",", port, ",\"", host, '"');
       int8_t res = waitResponse();
       if (res != 1) { return false; }
 
       // Enable Get Data from Network Manually
       //sendAT(GF("+CSORXGET=1,"), sockets[mux]->socket_id);
+      //sendAT(GF("+CSORXGET=1"));
       //if (waitResponse(GF("+CSORXGET:")) != 1) { return 0; }
-      //int8_t res = waitResponse();
 
+#if TINY_GSM_USE_HEX
+      sendAT(GF("+CSORCVFLAG=0"));
+#else
       sendAT(GF("+CSORCVFLAG=1"));
+#endif
       res = waitResponse();
 
       return res == 1;
@@ -412,6 +416,9 @@ class TinyGsmSim7020 : public TinyGsmSim70xx<TinyGsmSim7020>,
       waitResponse();
       return len;
     } else {
+#if TINY_GSM_USE_HEX
+      // TODO: hex send
+#else
       // Send Data to Remote Via Socket With Data Mode
       sendAT(GF("+CSODSEND="), sockets[mux]->socket_id, ',', (uint16_t)len);
       if (waitResponse(GF(">")) != 1) { return 0; }
@@ -426,6 +433,7 @@ class TinyGsmSim7020 : public TinyGsmSim70xx<TinyGsmSim7020>,
         DBG("### Mismatch accepted data", accepted, "length", len);
       }
       waitResponse();
+#endif
       return len;
     }
   }
@@ -461,10 +469,13 @@ class TinyGsmSim7020 : public TinyGsmSim70xx<TinyGsmSim7020>,
     }
 
     if (len_confirmed <= 0) {
-      waitResponse();
       sockets[mux]->sock_available = modemGetAvailable(mux);
       return 0;
     }
+
+#if TINY_GSM_USE_HEX
+      // TODO: hex receive
+#else
 
     for (int i = 0; i < len_confirmed; i++) {
       uint32_t startMillis = millis();
@@ -475,10 +486,10 @@ class TinyGsmSim7020 : public TinyGsmSim70xx<TinyGsmSim7020>,
       char c = stream.read();
       sockets[mux]->rx.put(c);
     }
-    waitResponse();
     // make sure the sock available number is accurate again
     sockets[mux]->sock_available = modemGetAvailable(mux);
-    return len_confirmed;    
+    return len_confirmed;
+#endif
   }
 
   size_t modemGetAvailable(uint8_t mux) {
