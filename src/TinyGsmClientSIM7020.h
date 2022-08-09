@@ -103,8 +103,8 @@ class TinyGsmSim7020 : public TinyGsmSim70xx<TinyGsmSim7020>,
     }
 
    public:
-    bool setCertificate(const String& certificateName) {
-      return at->setCertificate(certificateName, mux);
+    bool setRootCA(const String& rootCA) {
+      return at->setRootCA(rootCA, mux);
     }
 
     virtual int connect(const char* host, uint16_t port,
@@ -229,9 +229,9 @@ class TinyGsmSim7020 : public TinyGsmSim70xx<TinyGsmSim7020>,
    * Secure socket layer functions
    */
  protected:
-  bool setCertificate(const String& certificateName, const uint8_t mux = 0) {
+  bool setRootCA(const String& rootCA, const uint8_t mux = 0) {
     if (mux >= TINY_GSM_MUX_COUNT) return false;
-    certificates[mux] = certificateName;
+    certificates[mux] = rootCA;
     return true;
   }
 
@@ -334,107 +334,21 @@ class TinyGsmSim7020 : public TinyGsmSim70xx<TinyGsmSim7020>,
  protected:
   bool modemConnect(const char* host, uint16_t port, uint8_t mux,
                     bool ssl = false, int timeout_s = 75) {
-    uint32_t timeout_ms = ((uint32_t)timeout_s) * 1000;
-
     if (ssl) {
-      // Configure TLS Parameters
-      // AT+CTLSCFG=<tid>,<type>,<value>[,<type>,<value>...
-      // <tid> TLS identifier (1-6)
-      // <type> 1: Server name
-      //        2: Port (default 443)
-      //        3: Socket type (must be 0 = tcp)
-      //        4: Auth_mode (default 2)
-      //        5: Debug level
-      //        6: Server CA (<size>,<more>,<certficiate>)
-      //        7: Client certificate
-      //        8: Client private key
-      sendAT(GF("+CTLSCFG="), mux, ",1,\"", host, "\",2,", port, ",3,0,4,0,5,2");
-      if (waitResponse(5000L) != 1) return false;
-
-      if (certificates[mux] != "") {
-        sendAT(GF("+CTLSCFG="), mux, ",6,", certificates[mux].length(),",\"", certificates[mux].c_str(),
-               "\"");
-        if (waitResponse(5000L) != 1) return false;
-      }
-
-      sockets[mux]->socket_id = -1;
-      sockets[mux]->is_tls = true;
-
-      sendAT(GF("+CTLSCONN="), mux, ",1");
-      // Sends OK
-      if (waitResponse() != 1) { return false; }
-      // Then the connection status
-      if (waitResponse(120000L, GF(GSM_NL "+CTLSCONN:")) != 1) { return false; }
-      streamSkipUntil(',');
-      int32_t res = stream.parseInt();
-      streamSkipUntil('\n');
-      if (res != 1) {
-        DBG("### TLS connection error", res);
-      }
-      return res == 1;
+      return tlsModemConnect(host, port, mux, timeout_s);
     } else {
-      // Create a TCP/UDP Socket
-      // AT+CSOC=<domain>,<type>,<protocol>[,<cid>]
-      // <domain> 1: IPv4, 2: IPv6
-      // <type> 1: TCP, 2: UDP, 3: RAW
-      // <protocol> 1: IP, 2: ICMP
-      sendAT(GF("+CSOC=1,1,1"));
-      if (waitResponse(GF(GSM_NL "+CSOC:")) != 1) { return false; }
-      // returns <socket id> range 0-4
-      int8_t socket_id = streamGetIntBefore('\n');
-      waitResponse();
-      sockets[mux]->socket_id = socket_id;
-      sockets[mux]->is_tls = false;
-
-      // Connect Socket to Remote Address and Port
-      // AT+CSOCON=<socket_id>,<remote_port>,<remote_address>
-      sendAT(GF("+CSOCON="), sockets[mux]->socket_id, ",", port, ",\"", host, '"');
-      int8_t res = waitResponse();
-      if (res != 1) { return false; }
-
-      // Enable Get Data from Network Manually
-      //sendAT(GF("+CSORXGET=1,"), sockets[mux]->socket_id);
-      //sendAT(GF("+CSORXGET=1"));
-      //if (waitResponse(GF("+CSORXGET:")) != 1) { return 0; }
-
-#if TINY_GSM_USE_HEX
-      sendAT(GF("+CSORCVFLAG=0"));
-#else
-      sendAT(GF("+CSORCVFLAG=1"));
-#endif
-      res = waitResponse();
-
-      return res == 1;
+      return insecureModemConnect(host, port, mux, timeout_s);
     }
   }
 
   int16_t modemSend(const void* buff, size_t len, uint8_t mux) {
+    if (!sockets[mux]) { return 0; }
+    if (!sockets[mux]->sock_connected) { return 0; }
+
     if (sockets[mux]->is_tls) {
-      // Send Data
-      sendAT(GF("+CTLSSEND="), sockets[mux]->socket_id, ',', (uint16_t)len, ",\"", (const char*)buff, '"');
-      if (waitResponse(GF(GSM_NL "+CTLSSEND:")) != 1) { return 0; }
-      waitResponse();
-      return len;
+      return tlsModemSend(buff, len, mux);
     } else {
-#if TINY_GSM_USE_HEX
-      // TODO: hex send
-#else
-      // Send Data to Remote Via Socket With Data Mode
-      sendAT(GF("+CSODSEND="), sockets[mux]->socket_id, ',', (uint16_t)len);
-      if (waitResponse(GF(">")) != 1) { return 0; }
-
-      stream.write(reinterpret_cast<const uint8_t*>(buff), len);
-      stream.flush();
-
-      // DATA ACCEPT after posting data      
-      if (waitResponse(GF(GSM_NL "DATA ACCEPT:")) != 1) { return 0; }
-      int8_t accepted = streamGetIntBefore('\n');
-      if (accepted != len) {
-        DBG("### Mismatch accepted data", accepted, "length", len);
-      }
-      waitResponse();
-#endif
-      return len;
+      return insecureModemSend(buff, len, mux);
     }
   }
 
@@ -442,54 +356,11 @@ class TinyGsmSim7020 : public TinyGsmSim70xx<TinyGsmSim7020>,
     if (!sockets[mux]) { return 0; }
     if (!sockets[mux]->sock_connected) { return 0; }
 
-    int16_t len_confirmed = 0;
     if (sockets[mux]->is_tls) {
-      if (size > 1024) {
-        size = 1024;
-      }
-      // Send Data
-      sendAT(GF("+CTLSRECV="), mux, ',', (uint16_t)size);
-      if (waitResponse(GF(GSM_NL "+CTLSRECV:")) != 1) { return 0; }
-
-      streamSkipUntil(',');  // skip the response mux
-      len_confirmed = streamGetIntBefore(',');
-      streamSkipUntil('"');  // skip the open quote
+      return tlsModemRead(size, mux);
     } else {
-      if (size > 1460) {
-        size = 1460;
-      }
-      // Get Data
-      sendAT(GF("+CSORXGET=2,"), sockets[mux]->socket_id, ',', (uint16_t)size);
-      if (waitResponse(GF("+CSORXGET:")) != 1) { return 0; }
-
-      streamSkipUntil(',');  // skip the mode
-      streamSkipUntil(',');  // skip the response socket id
-      streamSkipUntil(',');  // skip the response requested length
-      len_confirmed = streamGetIntBefore(',');
+      return insecureModemRead(size, mux);
     }
-
-    if (len_confirmed <= 0) {
-      sockets[mux]->sock_available = modemGetAvailable(mux);
-      return 0;
-    }
-
-#if TINY_GSM_USE_HEX
-      // TODO: hex receive
-#else
-
-    for (int i = 0; i < len_confirmed; i++) {
-      uint32_t startMillis = millis();
-      while (!stream.available() &&
-            (millis() - startMillis < sockets[mux]->_timeout)) {
-        TINY_GSM_YIELD();
-      }
-      char c = stream.read();
-      sockets[mux]->rx.put(c);
-    }
-    // make sure the sock available number is accurate again
-    sockets[mux]->sock_available = modemGetAvailable(mux);
-    return len_confirmed;
-#endif
   }
 
   size_t modemGetAvailable(uint8_t mux) {
@@ -679,6 +550,198 @@ class TinyGsmSim7020 : public TinyGsmSim70xx<TinyGsmSim7020>,
       }
     }
     return -1;
+  }
+
+  /*
+   * Non-TLS implementation
+   */
+
+  bool insecureModemConnect(const char* host, uint16_t port, uint8_t mux,
+                    int timeout_s = 75) {
+    uint32_t timeout_ms = ((uint32_t)timeout_s) * 1000;
+
+    // Create a TCP/UDP Socket
+    // AT+CSOC=<domain>,<type>,<protocol>[,<cid>]
+    // <domain> 1: IPv4, 2: IPv6
+    // <type> 1: TCP, 2: UDP, 3: RAW
+    // <protocol> 1: IP, 2: ICMP
+    sendAT(GF("+CSOC=1,1,1"));
+    if (waitResponse(GF(GSM_NL "+CSOC:")) != 1) { return false; }
+    // returns <socket id> range 0-4
+    int8_t socket_id = streamGetIntBefore('\n');
+    waitResponse();
+    sockets[mux]->socket_id = socket_id;
+    sockets[mux]->is_tls = false;
+
+    // Connect Socket to Remote Address and Port
+    // AT+CSOCON=<socket_id>,<remote_port>,<remote_address>
+    sendAT(GF("+CSOCON="), sockets[mux]->socket_id, ",", port, ",\"", host, '"');
+    int8_t res = waitResponse();
+    if (res != 1) { return false; }
+
+    // Enable Get Data from Network Manually
+    //sendAT(GF("+CSORXGET=1,"), sockets[mux]->socket_id);
+    //sendAT(GF("+CSORXGET=1"));
+    //if (waitResponse(GF("+CSORXGET:")) != 1) { return 0; }
+
+#if TINY_GSM_USE_HEX
+    sendAT(GF("+CSORCVFLAG=0"));
+#else
+    sendAT(GF("+CSORCVFLAG=1"));
+#endif
+    res = waitResponse();
+
+    return res == 1;
+  }
+
+  int16_t insecureModemSend(const void* buff, size_t len, uint8_t mux) {
+#if TINY_GSM_USE_HEX
+    // TODO: hex send
+#else
+    // Send Data to Remote Via Socket With Data Mode
+    sendAT(GF("+CSODSEND="), sockets[mux]->socket_id, ',', (uint16_t)len);
+    if (waitResponse(GF(">")) != 1) { return 0; }
+
+    stream.write(reinterpret_cast<const uint8_t*>(buff), len);
+    stream.flush();
+
+    // DATA ACCEPT after posting data      
+    if (waitResponse(GF(GSM_NL "DATA ACCEPT:")) != 1) { return 0; }
+    int8_t accepted = streamGetIntBefore('\n');
+    if (accepted != len) {
+      DBG("### Mismatch accepted data", accepted, "length", len);
+    }
+    waitResponse();
+#endif
+    return len;
+  }
+
+  size_t insecureModemRead(size_t size, uint8_t mux) {
+    if (!sockets[mux]) { return 0; }
+    if (!sockets[mux]->sock_connected) { return 0; }
+
+    int16_t len_confirmed = 0;
+    if (size > 1460) {
+      size = 1460;
+    }
+    // Get Data
+    sendAT(GF("+CSORXGET=2,"), sockets[mux]->socket_id, ',', (uint16_t)size);
+    if (waitResponse(GF("+CSORXGET:")) != 1) { return 0; }
+
+    streamSkipUntil(',');  // skip the mode
+    streamSkipUntil(',');  // skip the response socket id
+    streamSkipUntil(',');  // skip the response requested length
+    len_confirmed = streamGetIntBefore(',');
+
+    if (len_confirmed <= 0) {
+      sockets[mux]->sock_available = modemGetAvailable(mux);
+      return 0;
+    }
+
+#if TINY_GSM_USE_HEX
+      // TODO: hex receive
+#else
+    for (int i = 0; i < len_confirmed; i++) {
+      uint32_t startMillis = millis();
+      while (!stream.available() &&
+            (millis() - startMillis < sockets[mux]->_timeout)) {
+        TINY_GSM_YIELD();
+      }
+      char c = stream.read();
+      sockets[mux]->rx.put(c);
+    }
+    // make sure the sock available number is accurate again
+    sockets[mux]->sock_available = modemGetAvailable(mux);
+    return len_confirmed;
+#endif
+  }
+
+  /*
+   * TLS implementation
+   */
+
+  bool tlsModemConnect(const char* host, uint16_t port, uint8_t mux,
+                    int timeout_s = 75) {
+    uint32_t timeout_ms = ((uint32_t)timeout_s) * 1000;
+
+    // Configure TLS Parameters
+    // AT+CTLSCFG=<tid>,<type>,<value>[,<type>,<value>...
+    // <tid> TLS identifier (1-6)
+    // <type> 1: Server name
+    //        2: Port (default 443)
+    //        3: Socket type (must be 0 = tcp)
+    //        4: Auth_mode (default 2)
+    //        5: Debug level
+    //        6: Server CA (<size>,<more>,<certficiate>)
+    //        7: Client certificate
+    //        8: Client private key
+    sendAT(GF("+CTLSCFG="), mux, ",1,\"", host, "\",2,", port, ",3,0,4,0,5,2");
+    if (waitResponse(5000L) != 1) return false;
+
+    if (certificates[mux] != "") {
+      sendAT(GF("+CTLSCFG="), mux, ",6,", certificates[mux].length(),",\"", certificates[mux].c_str(),
+              "\"");
+      if (waitResponse(5000L) != 1) return false;
+    }
+
+    sockets[mux]->socket_id = -1;
+    sockets[mux]->is_tls = true;
+
+    sendAT(GF("+CTLSCONN="), mux, ",1");
+    // Sends OK
+    if (waitResponse() != 1) { return false; }
+    // Then the connection status
+    if (waitResponse(120000L, GF(GSM_NL "+CTLSCONN:")) != 1) { return false; }
+    streamSkipUntil(',');
+    int32_t res = stream.parseInt();
+    streamSkipUntil('\n');
+    if (res != 1) {
+      DBG("### TLS connection error", res);
+    }
+    return res == 1;
+  }
+
+  int16_t tlsModemSend(const void* buff, size_t len, uint8_t mux) {
+    // Send Data
+    sendAT(GF("+CTLSSEND="), sockets[mux]->socket_id, ',', (uint16_t)len, ",\"", (const char*)buff, '"');
+    if (waitResponse(GF(GSM_NL "+CTLSSEND:")) != 1) { return 0; }
+    waitResponse();
+    return len;
+  }
+
+  size_t tlsModemRead(size_t size, uint8_t mux) {
+    if (!sockets[mux]) { return 0; }
+    if (!sockets[mux]->sock_connected) { return 0; }
+    int16_t len_confirmed = 0;
+
+    if (size > 1024) {
+      size = 1024;
+    }
+    // Send Data
+    sendAT(GF("+CTLSRECV="), mux, ',', (uint16_t)size);
+    if (waitResponse(GF(GSM_NL "+CTLSRECV:")) != 1) { return 0; }
+
+    streamSkipUntil(',');  // skip the response mux
+    len_confirmed = streamGetIntBefore(',');
+    streamSkipUntil('"');  // skip the open quote
+
+    if (len_confirmed <= 0) {
+      sockets[mux]->sock_available = modemGetAvailable(mux);
+      return 0;
+    }
+
+    for (int i = 0; i < len_confirmed; i++) {
+      uint32_t startMillis = millis();
+      while (!stream.available() &&
+            (millis() - startMillis < sockets[mux]->_timeout)) {
+        TINY_GSM_YIELD();
+      }
+      char c = stream.read();
+      sockets[mux]->rx.put(c);
+    }
+    // make sure the sock available number is accurate again
+    sockets[mux]->sock_available = modemGetAvailable(mux);
+    return len_confirmed;
   }
 };
 
