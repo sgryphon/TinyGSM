@@ -72,8 +72,8 @@ class TinyGsmSim7020 : public TinyGsmSim70xx<TinyGsmSim7020>,
         dumpModemBuffer(maxWaitMs);
         at->sendAT(GF("+CSOCL="), socket_id);
         at->waitResponse(3000);
+        sock_connected = false;
       }
-      sock_connected = false;
     }
     void stop() override {
       stop(15000L);
@@ -118,10 +118,12 @@ class TinyGsmSim7020 : public TinyGsmSim70xx<TinyGsmSim7020>,
     TINY_GSM_CLIENT_CONNECT_OVERRIDES
 
     void stop(uint32_t maxWaitMs) {
-      dumpModemBuffer(maxWaitMs);
-      at->sendAT(GF("+CTLSCLOSE="), mux);
-      sock_connected = false;
-      at->waitResponse(3000);
+      if (socket_id > -1 && sock_connected) {
+        dumpModemBuffer(maxWaitMs);
+        at->sendAT(GF("+CTLSCLOSE="), mux);
+        sock_connected = false;
+        at->waitResponse(3000);
+      }
     }
     void stop() override {
       stop(15000L);
@@ -166,6 +168,10 @@ class TinyGsmSim7020 : public TinyGsmSim70xx<TinyGsmSim7020>,
 
     // Enable battery checks
     sendAT(GF("+CBATCHK=1"));
+    if (waitResponse() != 1) { return false; }
+
+    // Set IPv6 format
+    sendAT(GF("+CGPIAF=1,1,0,1"));
     if (waitResponse() != 1) { return false; }
 
     SimStatus ret = getSimStatus();
@@ -271,7 +277,8 @@ class TinyGsmSim7020 : public TinyGsmSim70xx<TinyGsmSim7020>,
     //sendAT(GF("+CGREG?"));
     //res = waitResponse(20000L, GF(GSM_NL "+CGREG: 0,1"));
     //waitResponse();
-    res = waitForNetwork();
+    res = waitForNetwork(60000, true);
+    delay(100);
 
     return res;
   }
@@ -341,7 +348,7 @@ class TinyGsmSim7020 : public TinyGsmSim70xx<TinyGsmSim7020>,
       //        6: Server CA (<size>,<more>,<certficiate>)
       //        7: Client certificate
       //        8: Client private key
-      sendAT(GF("+CTLSCFG="), mux, ",1,", host, ",2,", port);
+      sendAT(GF("+CTLSCFG="), mux, ",1,\"", host, "\",2,", port, ",3,0,4,0,5,2");
       if (waitResponse(5000L) != 1) return false;
 
       if (certificates[mux] != "") {
@@ -354,10 +361,16 @@ class TinyGsmSim7020 : public TinyGsmSim70xx<TinyGsmSim7020>,
       sockets[mux]->is_tls = true;
 
       sendAT(GF("+CTLSCONN="), mux, ",1");
-      if (waitResponse(GF(GSM_NL "+CTLSCONN:")) != 1) { return false; }
+      // Sends OK
+      if (waitResponse() != 1) { return false; }
+      // Then the connection status
+      if (waitResponse(120000L, GF(GSM_NL "+CTLSCONN:")) != 1) { return false; }
       streamSkipUntil(',');
-      int8_t res = stream.parseInt();
-      waitResponse();
+      int32_t res = stream.parseInt();
+      streamSkipUntil('\n');
+      if (res != 1) {
+        DBG("### TLS connection error", res);
+      }
       return res == 1;
     } else {
       // Create a TCP/UDP Socket
@@ -368,7 +381,7 @@ class TinyGsmSim7020 : public TinyGsmSim70xx<TinyGsmSim7020>,
       sendAT(GF("+CSOC=1,1,1"));
       if (waitResponse(GF(GSM_NL "+CSOC:")) != 1) { return false; }
       // returns <socket id> range 0-4
-      int8_t socket_id = stream.parseInt();
+      int8_t socket_id = streamGetIntBefore('\n');
       waitResponse();
       sockets[mux]->socket_id = socket_id;
       sockets[mux]->is_tls = false;
@@ -394,7 +407,7 @@ class TinyGsmSim7020 : public TinyGsmSim70xx<TinyGsmSim7020>,
   int16_t modemSend(const void* buff, size_t len, uint8_t mux) {
     if (sockets[mux]->is_tls) {
       // Send Data
-      sendAT(GF("+CTLSSEND="), sockets[mux]->socket_id, ',', (uint16_t)len, (const char*)buff);
+      sendAT(GF("+CTLSSEND="), sockets[mux]->socket_id, ',', (uint16_t)len, ",\"", (const char*)buff, '"');
       if (waitResponse(GF(GSM_NL "+CTLSSEND:")) != 1) { return 0; }
       waitResponse();
       return len;
@@ -431,8 +444,7 @@ class TinyGsmSim7020 : public TinyGsmSim70xx<TinyGsmSim7020>,
       if (waitResponse(GF(GSM_NL "+CTLSRECV:")) != 1) { return 0; }
 
       streamSkipUntil(',');  // skip the response mux
-      len_confirmed = stream.parseInt();
-      streamSkipUntil(',');  // skip the comma
+      len_confirmed = streamGetIntBefore(',');
       streamSkipUntil('"');  // skip the open quote
     } else {
       if (size > 1460) {
@@ -445,8 +457,7 @@ class TinyGsmSim7020 : public TinyGsmSim70xx<TinyGsmSim7020>,
       streamSkipUntil(',');  // skip the mode
       streamSkipUntil(',');  // skip the response socket id
       streamSkipUntil(',');  // skip the response requested length
-      len_confirmed = stream.parseInt();
-      streamSkipUntil(',');  // skip the comma
+      len_confirmed = streamGetIntBefore(',');
     }
 
     if (len_confirmed <= 0) {
@@ -481,7 +492,7 @@ class TinyGsmSim7020 : public TinyGsmSim70xx<TinyGsmSim7020>,
 
       streamSkipUntil(',');  // skip the mode
       streamSkipUntil(',');  // skip the response socket id
-      int16_t len_confirmed = stream.parseInt();
+      int16_t len_confirmed = streamGetIntBefore('\n');
       waitResponse();
 
       sockets[mux]->sock_available = len_confirmed;
@@ -570,7 +581,6 @@ class TinyGsmSim7020 : public TinyGsmSim70xx<TinyGsmSim7020>,
           int8_t mux = getMuxFromSocketId(socket_id);
           if (mux >= 0) {
             sockets[mux]->got_data = true;
-            DBG("### Got Data:", data_length, "on", mux);
           }
           for (int i = 0; i < data_length; i++) {
             uint32_t startMillis = millis();
@@ -583,14 +593,15 @@ class TinyGsmSim7020 : public TinyGsmSim70xx<TinyGsmSim7020>,
               sockets[mux]->rx.put(c);
             }
           }
+          DBG("### Got Data:", data_length, "on", mux);
           data = "";
         } else if (data.endsWith(GF("+CSOERR:"))) {
           int8_t socket_id = streamGetIntBefore(',');
           int8_t error_code = streamGetIntBefore('\n');
           int8_t mux = getMuxFromSocketId(socket_id);
+          sockets[mux]->sock_connected = false;
           // <error code> 4 = disconnected (expected automatic disconnection)
           if (mux >= 0 && error_code != 4) {
-            sockets[mux]->sock_connected = false;
             DBG("### Closed: ", mux, "error", error_code);
           }
           data = "";
