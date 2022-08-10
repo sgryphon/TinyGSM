@@ -25,6 +25,14 @@
 #define TINY_GSM_HTTP_DATA_BUFFER 2000
 #endif
 
+#ifndef GSM_HTTP_RESPONSE_WAIT
+#define GSM_HTTP_RESPONSE_WAIT 500
+#endif
+
+#ifndef GSM_HTTP_RESPONSE_TIMEOUT
+#define GSM_HTTP_RESPONSE_TIMEOUT 30000
+#endif
+
 #define GSM_HTTP_METHOD_GET "GET"
 #define GSM_HTTP_METHOD_POST   "POST"
 #define GSM_HTTP_METHOD_PUT    "PUT"
@@ -70,8 +78,6 @@ class TinyGsmHTTP {
     // Make all classes created from the modem template friends
     friend class TinyGsmHTTP<modemType, muxCount>;
 
-    typedef TinyGsmFifo<uint8_t, TINY_GSM_HTTP_DATA_BUFFER> DataFifo;
-
    /*
     * HTTP functions compatible with ArduinoHttpClient
     */
@@ -114,15 +120,38 @@ class TinyGsmHTTP {
                      const char* content_type = NULL,
                      int content_length = -1,
                      const byte body[] = NULL) {
+      resetState();
       return startRequestImpl(url_path, http_method, content_type, content_length, body);
     }
 
+    virtual void stop() {
+      stopImpl();
+    }
+
    protected:
+    virtual void resetState() {
+      this->response_status_code = 0;
+      this->headers[0] = '\0';
+      this->data[0] = '\0';
+      this->is_completed = false;
+    }
+
     virtual String responseBodyImpl() {
-      return String(data);
+      unsigned long timeout_end = millis() + GSM_HTTP_RESPONSE_TIMEOUT;
+      while (!is_completed) {
+
+        if (millis() > timeout_end) { return String((const char*)NULL); }
+        at->waitResponse(GSM_HTTP_RESPONSE_WAIT);
+      }
+      return String(this->data);
     }
 
     virtual int responseStatusCodeImpl() {
+      unsigned long timeout_end = millis() + GSM_HTTP_RESPONSE_TIMEOUT;
+      while (response_status_code == 0) {
+        if (millis() > timeout_end) { return GSM_HTTP_ERROR_TIMED_OUT; }
+        at->waitResponse(GSM_HTTP_RESPONSE_WAIT);
+      }
       return response_status_code;
     }
 
@@ -132,11 +161,14 @@ class TinyGsmHTTP {
                      int content_length = -1,
                      const byte body[] = NULL) TINY_GSM_ATTR_NOT_IMPLEMENTED;
 
+    virtual void stopImpl() {}
+
     modemType* at = nullptr;
     char data[TINY_GSM_HTTP_DATA_BUFFER] = { 0 };
     char headers[TINY_GSM_HTTP_HEADER_BUFFER] = { 0 };
+    bool is_completed = false;
     bool is_connected = false;
-    uint8_t mux = -1;
+    int8_t http_client_id = -1;
     int16_t response_status_code = 0;
     UrlScheme scheme = SCHEME_UNKNOWN;
     const char *server_name = { 0 }; 

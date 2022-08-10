@@ -151,7 +151,7 @@ class TinyGsmSim7020 : public TinyGsmSim70xx<TinyGsmSim7020>,
       this->scheme = scheme;
       this->server_name = server_name;
       this->server_port = server_port;
-      this->mux = -1;
+      this->http_client_id = -1;
 
       return true;
     }
@@ -163,38 +163,50 @@ class TinyGsmSim7020 : public TinyGsmSim70xx<TinyGsmSim7020>,
                      int content_length = -1,
                      const byte body[] = NULL) override {
       DBG(GF("### HTTP"), http_method, url_path);
+
       // Connect if needed
       if (!is_connected) {
-        DBG(GF("### HTTP connecting"));
+        // Create if needed
+        if (this->http_client_id == -1) {
+          DBG(GF("### HTTP creating"));
 
-        // Create
-        if (scheme == SCHEME_HTTP) {
-          at->sendAT(GF("+CHTTPCREATE=\""), PREFIX_HTTP, server_name, ':', server_port, "/\"");
-        } else if (scheme == SCHEME_HTTPS) {
-          // TODO: with cert
-        } else {
-          return GSM_HTTP_ERROR_API;
+          // Create
+          if (scheme == SCHEME_HTTP) {
+            at->sendAT(GF("+CHTTPCREATE=\""), PREFIX_HTTP, server_name, ':', server_port, "/\"");
+          } else if (scheme == SCHEME_HTTPS) {
+            // TODO: with cert
+          } else {
+            return GSM_HTTP_ERROR_API;
+          }
+
+          if (at->waitResponse(30000, GF(GSM_NL "+CHTTPCREATE:")) != 1) { 
+            at->sendAT(GF("+CHTTPCREATE?"));
+            at->waitResponse();
+            return GSM_HTTP_ERROR_API;
+          }
+          int8_t http_client_id = at->streamGetIntBefore('\n');
+          DBG(GF("### HTTP client created:"), http_client_id);
+          if (at->waitResponse() != 1) { return GSM_HTTP_ERROR_API; }
+
+          // Store the connection
+          this->http_client_id = http_client_id;
+          at->http_clients[this->http_client_id] = this;
         }
 
-        if (at->waitResponse(30000, GF(GSM_NL "+CHTTPCREATE:")) != 1) { return GSM_HTTP_ERROR_API; }
-        int8_t http_client_id = at->streamGetIntBefore('\n');
-        DBG(GF("### HTTP client created:"), http_client_id);
-        if (at->waitResponse() != 1) { return GSM_HTTP_ERROR_API; }
-
-        // Store the connection
-        this->mux = http_client_id;
-        at->http_clients[this->mux] = this;
+        DBG(GF("### HTTP connecting"), http_client_id);
 
         // Connect
-        at->sendAT(GF("+CHTTPCON="), this->mux);
-        if (at->waitResponse(30000) != 1) { return GSM_HTTP_ERROR_CONNECTION_FAILED; }
+        at->sendAT(GF("+CHTTPCON="), this->http_client_id);
+        if (at->waitResponse(30000) != 1) { 
+          return GSM_HTTP_ERROR_CONNECTION_FAILED;
+        }
 
         is_connected = true;
       }
 
       // Send the request
       if (strcmp(http_method, GSM_HTTP_METHOD_GET) == 0) {
-        at->sendAT(GF("+CHTTPSEND="), this->mux, ",0,", url_path);
+        at->sendAT(GF("+CHTTPSEND="), this->http_client_id, ",0,", url_path);
         if (at->waitResponse(5000) != 1) { return GSM_HTTP_ERROR_INVALID_RESPONSE; }
       // } else if (strcmp(http_method, GSM_HTTP_METHOD_POST) == 0) {
 
@@ -207,6 +219,15 @@ class TinyGsmSim7020 : public TinyGsmSim70xx<TinyGsmSim7020>,
       }
 
       return GSM_HTTP_SUCCESS;
+    }
+
+    void stopImpl() override {
+      if (this->http_client_id > -1) {
+        at->sendAT(GF("+CHTTPDISCON="), this->http_client_id);
+        at->waitResponse(30000);
+        at->sendAT(GF("+CHTTPDESTROY="), this->http_client_id);
+        at->waitResponse(30000);
+      }
     }
 
     /*
@@ -659,8 +680,6 @@ class TinyGsmSim7020 : public TinyGsmSim70xx<TinyGsmSim7020>,
           GsmHttpClientSim7020 *http_client = http_clients[mux];
           int16_t response_code = streamGetIntBefore(',');
           http_client->response_status_code = response_code;
-          http_client->headers[0] = '\0';
-          http_client->data[0] = '\0';
           int16_t header_length = streamGetIntBefore(',');
           if (header_length > 0) {
             for (int i = 0; i < header_length; i++) {
@@ -677,6 +696,49 @@ class TinyGsmSim7020 : public TinyGsmSim70xx<TinyGsmSim7020>,
             http_client->headers[header_length] = '\0';
           }
           DBG("### HTTP got response", response_code, "length", header_length, "on", mux);
+          data = "";
+        } else if (data.endsWith(GF("+CHTTPNMIC:"))) {
+          int8_t mux = streamGetIntBefore(',');
+          GsmHttpClientSim7020 *http_client = http_clients[mux];
+          int16_t more_flag = streamGetIntBefore(',');
+          int16_t content_length = streamGetIntBefore(',');
+          int16_t package_length = streamGetIntBefore(',');
+          if (package_length > 0) {
+            int16_t previous_data_length = strlen(http_client->data);
+            char hex[3] = { 0, 0, 0 };
+            DBG("### HTTP reading hex", previous_data_length, "to", previous_data_length + package_length);
+            for (int i = previous_data_length; i < previous_data_length + package_length; i++) {
+              uint32_t startMillis = millis();
+              while (!stream.available() &&
+                    (millis() - startMillis < 1000)) {
+                TINY_GSM_YIELD();
+              }
+              hex[0] = stream.read();
+              hex[1] = stream.read();
+              if (http_client) {
+                http_client->data[i] = strtol(hex, NULL, 16);
+              }
+            }
+            http_client->data[previous_data_length + package_length] = '\0';
+          }
+          if (more_flag == 0) { 
+            http_client->is_completed = true;
+          }
+          DBG("### HTTP got content", more_flag, "length", package_length, "on", mux);
+          data = "";
+        } else if (data.endsWith(GF("+CHTTPERR:"))) {
+          int8_t mux = streamGetIntBefore(',');
+          int8_t error_code = streamGetIntBefore('\n');
+          GsmHttpClientSim7020 *http_client = http_clients[mux];
+          http_client->is_connected = false;
+          if (mux >= 0) {
+            if (error_code == -2) {
+              // <error code> -2 = closed by remote host (expected automatic disconnection)
+              DBG("### HTTP closed: ", mux);
+            } else {
+              DBG("### HTTP close: ", mux, "error", error_code);
+            }
+          }
           data = "";
         } else if (data.endsWith(GF("+CLTS:"))) {
           streamSkipUntil('\n');  // Refresh time and time zone by network
