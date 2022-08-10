@@ -83,8 +83,9 @@ SoftwareSerial SerialAT(2, 3);  // RX, TX
 #define TINY_GSM_TEST_WIFI false
 //#define TINY_GSM_TEST_TCP true
 #define TINY_GSM_TEST_TCP false
-#define TINY_GSM_TEST_SSL true
-//#define TINY_GSM_TEST_SSL false
+//#define TINY_GSM_TEST_SSL true
+#define TINY_GSM_TEST_SSL false
+#define TINY_GSM_TEST_HTTP true
 #define TINY_GSM_TEST_CALL false
 #define TINY_GSM_TEST_SMS false
 #define TINY_GSM_TEST_USSD false
@@ -383,6 +384,34 @@ void loop() {
     DBG("#####  RECEIVED:", strlen(logoS), "CHARACTERS");
     secureClient.stop();
   }
+#endif
+
+#if TINY_GSM_TEST_HTTP
+  SerialMon.println("##### HTTP TEST");
+  #ifndef TINY_GSM_MODEM_HAS_HTTP
+  typedef HttpClient   TinyGsmHttpClient;
+  #endif
+  TinyGsmClient client2(modem, 2);
+  TinyGsmHttpClient http(client2, server, 80);
+
+  int rc = http.get("/api/myip.php");
+  if (rc != 0) {
+    DBG("HTTP GET error:", rc);
+  } else {
+    int httpCode = http.responseStatusCode();
+    if (httpCode != 200 && httpCode != 301) {
+      DBG("HTTP response code error: ", httpCode);
+    } else {
+      DBG("HTTP response code: ", httpCode);
+      String payload = http.responseBody();
+      SerialMon.println("##### PAYLOAD:");
+      SerialMon.println(payload);
+    }
+  }
+
+  http.stop();
+
+  delay(2000);
 #endif
 
 #if TINY_GSM_TEST_CALL && defined TINY_GSM_MODEM_HAS_CALLING && \
