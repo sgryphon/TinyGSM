@@ -157,11 +157,11 @@ class TinyGsmSim7020 : public TinyGsmSim70xx<TinyGsmSim7020>,
     }
 
    protected:
-    String responseBodyImpl() {
+    String responseBodyImpl() override {
       return "";
     }
 
-    int responseStatusCodeImpl() {
+    int responseStatusCodeImpl() override {
       return 0;
     }
 
@@ -169,19 +169,22 @@ class TinyGsmSim7020 : public TinyGsmSim70xx<TinyGsmSim7020>,
                      const char* http_method,
                      const char* content_type = NULL,
                      int content_length = -1,
-                     const byte body[] = NULL) {
+                     const byte body[] = NULL) override {
+      DBG(GF("### HTTP"), http_method, url_path);
       // Connect if needed
       if (!is_connected) {
+        DBG(GF("### HTTP connecting"));
+
         // Create
         if (scheme == SCHEME_HTTP) {
-          at->sendAT(GF("+CHTTPCREATE=\""), SCHEME_HTTP, server_name, ':', server_port, "/\"");
+          at->sendAT(GF("+CHTTPCREATE=\""), PREFIX_HTTP, server_name, ':', server_port, "/\"");
         } else if (scheme == SCHEME_HTTPS) {
           // TODO: with cert
         } else {
           return GSM_HTTP_ERROR_API;
         }
 
-        if (at->waitResponse(GF(GSM_NL "+CHTTPCREATE:")) != 1) { return GSM_HTTP_ERROR_API; }
+        if (at->waitResponse(10000, GF(GSM_NL "+CHTTPCREATE:")) != 1) { return GSM_HTTP_ERROR_API; }
         int8_t http_client_id = at->streamGetIntBefore('\n');
         DBG(GF("### HTTP client created:"), http_client_id);
         if (at->waitResponse() != 1) { return GSM_HTTP_ERROR_API; }
@@ -192,7 +195,7 @@ class TinyGsmSim7020 : public TinyGsmSim70xx<TinyGsmSim7020>,
 
         // Connect
         at->sendAT(GF("+CHTTPCON="), this->mux);
-        if (at->waitResponse() != 1) { return GSM_HTTP_ERROR_CONNECTION_FAILED; }
+        if (at->waitResponse(30000) != 1) { return GSM_HTTP_ERROR_CONNECTION_FAILED; }
 
         is_connected = true;
       }
@@ -200,7 +203,7 @@ class TinyGsmSim7020 : public TinyGsmSim70xx<TinyGsmSim7020>,
       // Send the request
       if (strcmp(http_method, GSM_HTTP_METHOD_GET) == 0) {
         at->sendAT(GF("+CHTTPSEND="), this->mux, ",0,", url_path);
-        if (at->waitResponse() != 1) { return GSM_HTTP_ERROR_INVALID_RESPONSE; }
+        if (at->waitResponse(5000) != 1) { return GSM_HTTP_ERROR_INVALID_RESPONSE; }
       // } else if (strcmp(http_method, GSM_HTTP_METHOD_POST) == 0) {
 
       // } else if (strcmp(http_method, GSM_HTTP_METHOD_PUT) == 0) {

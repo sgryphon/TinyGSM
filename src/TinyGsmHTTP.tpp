@@ -71,7 +71,7 @@ class TinyGsmHTTP {
       @return 0 if successful, else error
     */
     int get(const char* url_path) {
-      return startRequest(GSM_HTTP_METHOD_GET, url_path);
+      return startRequest(url_path, GSM_HTTP_METHOD_GET);
     }
 
     /** Return the response body as a String
@@ -108,9 +108,9 @@ class TinyGsmHTTP {
     }
 
    protected:
-    String responseBodyImpl() TINY_GSM_ATTR_NOT_IMPLEMENTED;
-    int responseStatusCodeImpl() TINY_GSM_ATTR_NOT_IMPLEMENTED;
-    int startRequestImpl(const char* url_path,
+    virtual String responseBodyImpl() TINY_GSM_ATTR_NOT_IMPLEMENTED;
+    virtual int responseStatusCodeImpl() TINY_GSM_ATTR_NOT_IMPLEMENTED;
+    virtual int startRequestImpl(const char* url_path,
                      const char* http_method,
                      const char* content_type = NULL,
                      int content_length = -1,
