@@ -157,14 +157,6 @@ class TinyGsmSim7020 : public TinyGsmSim70xx<TinyGsmSim7020>,
     }
 
    protected:
-    String responseBodyImpl() override {
-      return "";
-    }
-
-    int responseStatusCodeImpl() override {
-      return 0;
-    }
-
     int startRequestImpl(const char* url_path,
                      const char* http_method,
                      const char* content_type = NULL,
@@ -184,7 +176,7 @@ class TinyGsmSim7020 : public TinyGsmSim70xx<TinyGsmSim7020>,
           return GSM_HTTP_ERROR_API;
         }
 
-        if (at->waitResponse(10000, GF(GSM_NL "+CHTTPCREATE:")) != 1) { return GSM_HTTP_ERROR_API; }
+        if (at->waitResponse(30000, GF(GSM_NL "+CHTTPCREATE:")) != 1) { return GSM_HTTP_ERROR_API; }
         int8_t http_client_id = at->streamGetIntBefore('\n');
         DBG(GF("### HTTP client created:"), http_client_id);
         if (at->waitResponse() != 1) { return GSM_HTTP_ERROR_API; }
@@ -661,6 +653,30 @@ class TinyGsmSim7020 : public TinyGsmSim70xx<TinyGsmSim7020>,
           if (mux >= 0 && error_code != 4) {
             DBG("### Closed: ", mux, "error", error_code);
           }
+          data = "";
+        } else if (data.endsWith(GF("+CHTTPNMIH:"))) {
+          int8_t mux = streamGetIntBefore(',');
+          GsmHttpClientSim7020 *http_client = http_clients[mux];
+          int16_t response_code = streamGetIntBefore(',');
+          http_client->response_status_code = response_code;
+          http_client->headers[0] = '\0';
+          http_client->data[0] = '\0';
+          int16_t header_length = streamGetIntBefore(',');
+          if (header_length > 0) {
+            for (int i = 0; i < header_length; i++) {
+              uint32_t startMillis = millis();
+              while (!stream.available() &&
+                    (millis() - startMillis < 1000)) {
+                TINY_GSM_YIELD();
+              }
+              char c = stream.read();
+              if (http_client) {
+                http_client->headers[i] = c;
+              }
+            }
+            http_client->headers[header_length] = '\0';
+          }
+          DBG("### HTTP got response", response_code, "length", header_length, "on", mux);
           data = "";
         } else if (data.endsWith(GF("+CLTS:"))) {
           streamSkipUntil('\n');  // Refresh time and time zone by network

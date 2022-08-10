@@ -17,6 +17,14 @@
 #define HTTP_AUTHORITY_BUFFER 255
 #endif
 
+#ifndef TINY_GSM_HTTP_HEADER_BUFFER
+#define TINY_GSM_HTTP_HEADER_BUFFER 500
+#endif
+
+#ifndef TINY_GSM_HTTP_DATA_BUFFER
+#define TINY_GSM_HTTP_DATA_BUFFER 2000
+#endif
+
 #define GSM_HTTP_METHOD_GET "GET"
 #define GSM_HTTP_METHOD_POST   "POST"
 #define GSM_HTTP_METHOD_PUT    "PUT"
@@ -61,6 +69,8 @@ class TinyGsmHTTP {
   class GsmHttpClient {
     // Make all classes created from the modem template friends
     friend class TinyGsmHTTP<modemType, muxCount>;
+
+    typedef TinyGsmFifo<uint8_t, TINY_GSM_HTTP_DATA_BUFFER> DataFifo;
 
    /*
     * HTTP functions compatible with ArduinoHttpClient
@@ -108,8 +118,14 @@ class TinyGsmHTTP {
     }
 
    protected:
-    virtual String responseBodyImpl() TINY_GSM_ATTR_NOT_IMPLEMENTED;
-    virtual int responseStatusCodeImpl() TINY_GSM_ATTR_NOT_IMPLEMENTED;
+    virtual String responseBodyImpl() {
+      return String(data);
+    }
+
+    virtual int responseStatusCodeImpl() {
+      return response_status_code;
+    }
+
     virtual int startRequestImpl(const char* url_path,
                      const char* http_method,
                      const char* content_type = NULL,
@@ -117,10 +133,13 @@ class TinyGsmHTTP {
                      const byte body[] = NULL) TINY_GSM_ATTR_NOT_IMPLEMENTED;
 
     modemType* at = nullptr;
-    const char *server_name = { 0 }; 
+    char data[TINY_GSM_HTTP_DATA_BUFFER] = { 0 };
+    char headers[TINY_GSM_HTTP_HEADER_BUFFER] = { 0 };
     bool is_connected = false;
     uint8_t mux = -1;
+    int16_t response_status_code = 0;
     UrlScheme scheme = SCHEME_UNKNOWN;
+    const char *server_name = { 0 }; 
     uint16_t server_port = 0;
   };
 };
