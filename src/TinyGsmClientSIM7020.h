@@ -23,11 +23,11 @@
 class TinyGsmSim7020 : public TinyGsmSim70xx<TinyGsmSim7020>,
                        public TinyGsmTCP<TinyGsmSim7020, TINY_GSM_MUX_COUNT>,
                        public TinyGsmSSL<TinyGsmSim7020>,
-                       public TinyGsmHTTP<TinyGsmSim7020> {
+                       public TinyGsmHTTP<TinyGsmSim7020, TINY_GSM_MUX_COUNT> {
   friend class TinyGsmSim70xx<TinyGsmSim7020>;
   friend class TinyGsmTCP<TinyGsmSim7020, TINY_GSM_MUX_COUNT>;
   friend class TinyGsmSSL<TinyGsmSim7020>;
-  friend class TinyGsmHTTP<TinyGsmSim7020>;
+  friend class TinyGsmHTTP<TinyGsmSim7020, TINY_GSM_MUX_COUNT>;
 
   /*
    * Inner Client
@@ -142,17 +142,77 @@ class TinyGsmSim7020 : public TinyGsmSim70xx<TinyGsmSim7020>,
    public:
     GsmHttpClientSim7020() {}
 
-    explicit GsmHttpClientSim7020(TinyGsmSim7020& modem, uint8_t mux = 0) {
-      init(&modem, mux);
+    explicit GsmHttpClientSim7020(GsmClientSim7020& client, const char* server_name, uint16_t server_port = 80) {
+      init(client.at, server_name, server_port, client.is_tls ? SCHEME_HTTPS : SCHEME_HTTP);
     }
 
-    bool init(TinyGsmSim7020* modem, uint8_t mux = 0) {
-      this->at       = modem;
+    bool init(TinyGsmSim7020* modem, const char* server_name, uint16_t server_port = 80, UrlScheme scheme = SCHEME_HTTP) {
+      this->at = modem;
+      this->scheme = scheme;
+      this->server_name = server_name;
+      this->server_port = server_port;
+      this->mux = -1;
 
       return true;
     }
 
-   public:
+   protected:
+    String responseBodyImpl() {
+      return "";
+    }
+
+    int responseStatusCodeImpl() {
+      return 0;
+    }
+
+    int startRequestImpl(const char* url_path,
+                     const char* http_method,
+                     const char* content_type = NULL,
+                     int content_length = -1,
+                     const byte body[] = NULL) {
+      // Connect if needed
+      if (!is_connected) {
+        // Create
+        if (scheme == SCHEME_HTTP) {
+          at->sendAT(GF("+CHTTPCREATE=\""), SCHEME_HTTP, server_name, ':', server_port, "/\"");
+        } else if (scheme == SCHEME_HTTPS) {
+          // TODO: with cert
+        } else {
+          return GSM_HTTP_ERROR_API;
+        }
+
+        if (at->waitResponse(GF(GSM_NL "+CHTTPCREATE:")) != 1) { return GSM_HTTP_ERROR_API; }
+        int8_t http_client_id = at->streamGetIntBefore('\n');
+        DBG(GF("### HTTP client created:"), http_client_id);
+        if (at->waitResponse() != 1) { return GSM_HTTP_ERROR_API; }
+
+        // Store the connection
+        this->mux = http_client_id;
+        at->http_clients[this->mux] = this;
+
+        // Connect
+        at->sendAT(GF("+CHTTPCON="), this->mux);
+        if (at->waitResponse() != 1) { return GSM_HTTP_ERROR_CONNECTION_FAILED; }
+
+        is_connected = true;
+      }
+
+      // Send the request
+      if (strcmp(http_method, GSM_HTTP_METHOD_GET) == 0) {
+        at->sendAT(GF("+CHTTPSEND="), this->mux, ",0,", url_path);
+        if (at->waitResponse() != 1) { return GSM_HTTP_ERROR_INVALID_RESPONSE; }
+      // } else if (strcmp(http_method, GSM_HTTP_METHOD_POST) == 0) {
+
+      // } else if (strcmp(http_method, GSM_HTTP_METHOD_PUT) == 0) {
+
+      // } else if (strcmp(http_method, GSM_HTTP_METHOD_DELETE) == 0) {
+
+      } else {
+        return GSM_HTTP_ERROR_API;
+      }
+
+      return GSM_HTTP_SUCCESS;
+    }
 
     /*
      * Extended API
@@ -652,8 +712,9 @@ class TinyGsmSim7020 : public TinyGsmSim70xx<TinyGsmSim7020>,
   }
 
  protected:
+  String certificates[TINY_GSM_MUX_COUNT];
+  GsmHttpClientSim7020* http_clients[TINY_GSM_MUX_COUNT];
   GsmClientSim7020* sockets[TINY_GSM_MUX_COUNT];
-  String            certificates[TINY_GSM_MUX_COUNT];
 
   int8_t getMuxFromSocketId(int8_t socket_id) {
     for (int muxNo = 0; muxNo < TINY_GSM_MUX_COUNT; muxNo++) {
@@ -670,7 +731,24 @@ class TinyGsmSim7020 : public TinyGsmSim70xx<TinyGsmSim7020>,
 
   bool insecureModemConnect(const char* host, uint16_t port, uint8_t mux,
                     int timeout_s = 75) {
+    DBG("### Insecure modem connect", host, ":", port);
+
     uint32_t timeout_ms = ((uint32_t)timeout_s) * 1000;
+
+    IPAddress address;
+    if (!address.fromString(host)) {
+      sendAT(GF("+CDNSGIP=\""), host, '"');
+      if (waitResponse(30000, GF(GSM_NL "+CDNSGIP:")) != 1) { return false; }
+      int8_t dns_success = streamGetIntBefore(',');
+      if (dns_success != 1) { return false; }
+      streamSkipUntil(','); // skip domain name
+      String dns_results = stream.readStringUntil('\n');
+      int16_t first_quote = dns_results.indexOf('"');
+      int16_t second_quote = dns_results.indexOf('"', first_quote + 1);
+      String dns_ip = dns_results.substring(first_quote + 1, second_quote - 1);
+      DBG("### Resolved DNS IP <", dns_ip, ">");
+      if (!address.fromString(dns_ip)) { return false; }
+    }
 
     // Create a TCP/UDP Socket
     // AT+CSOC=<domain>,<type>,<protocol>[,<cid>]
@@ -687,7 +765,7 @@ class TinyGsmSim7020 : public TinyGsmSim70xx<TinyGsmSim7020>,
 
     // Connect Socket to Remote Address and Port
     // AT+CSOCON=<socket_id>,<remote_port>,<remote_address>
-    sendAT(GF("+CSOCON="), sockets[mux]->socket_id, ",", port, ",\"", host, '"');
+    sendAT(GF("+CSOCON="), sockets[mux]->socket_id, ",", port, ",\"", address, '"');
     int8_t res = waitResponse();
     if (res != 1) { return false; }
 
@@ -706,26 +784,45 @@ class TinyGsmSim7020 : public TinyGsmSim70xx<TinyGsmSim7020>,
     return res == 1;
   }
 
-  int16_t insecureModemSend(const void* buff, size_t len, uint8_t mux) {
+  int16_t insecureModemSend(const void* buffer, size_t length, uint8_t mux) {
 #if TINY_GSM_USE_HEX
     // TODO: hex send
 #else
+    const uint8_t* data = reinterpret_cast<const uint8_t*>(buffer);
+    int16_t count_escaped = 0;
+    for (int16_t i = 0; i < length; i++) {
+      if (data[i] == '\r' || data[i] == '\n') {
+        count_escaped++;
+      }
+    }
+    int16_t total_length = length + count_escaped;
+
     // Send Data to Remote Via Socket With Data Mode
-    sendAT(GF("+CSODSEND="), sockets[mux]->socket_id, ',', (uint16_t)len);
+    sendAT(GF("+CSODSEND="), sockets[mux]->socket_id, ',', total_length);
     if (waitResponse(GF(">")) != 1) { return 0; }
 
-    stream.write(reinterpret_cast<const uint8_t*>(buff), len);
+    char c = 0;
+    for (int16_t i = 0; i < length; i++) {
+      c = data[i];
+      if (c == '\r') {
+        stream.write("\\r");
+      } if (c == '\n') {
+        stream.write("\\n");
+      } else {
+        stream.write(c);
+      }
+    }
     stream.flush();
 
     // DATA ACCEPT after posting data      
-    if (waitResponse(GF(GSM_NL "DATA ACCEPT:")) != 1) { return 0; }
+    if (waitResponse(1000, GF(GSM_NL "DATA ACCEPT:")) != 1) { return 0; }
     int8_t accepted = streamGetIntBefore('\n');
-    if (accepted != len) {
-      DBG("### Mismatch accepted data", accepted, "length", len);
+    if (accepted != total_length) {
+      DBG("### Mismatch accepted data", accepted, "total length", total_length);
     }
     waitResponse();
 #endif
-    return len;
+    return length;
   }
 
   size_t insecureModemRead(size_t size, uint8_t mux) {
@@ -774,6 +871,7 @@ class TinyGsmSim7020 : public TinyGsmSim70xx<TinyGsmSim7020>,
 
   bool tlsModemConnect(const char* host, uint16_t port, uint8_t mux,
                     int timeout_s = 75) {
+    DBG("### TLS modem connect", host, ":", port);
     uint32_t timeout_ms = ((uint32_t)timeout_s) * 1000;
 
     // Configure TLS Parameters
